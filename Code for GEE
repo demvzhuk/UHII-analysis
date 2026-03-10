@@ -1,0 +1,211 @@
+var snazzy = require("users/aazuspan/snazzy:styles");
+snazzy.addStyle("https://snazzymaps.com/style/38/shades-of-grey", "Greyscale");
+
+//var gaul = ee.FeatureCollection(table);
+//print(gaul.filter(ee.Filter.stringContains('ADM2_NAME', 'City of Cape Town Metropolitan Municipality')));   // для проыерки названия города в датасете
+
+var cityAsset = ee.FeatureCollection("projects/dotted-banner-477508-p8/assets/Moscow_boundary");
+
+var city = cityAsset
+
+Map.centerObject(city, 9);
+Map.addLayer(city.style({color: 'black', fillColor: '00000000'}), {}, 'Граница города');
+
+var visUHI = {
+  min: -4, 
+  max: 4, 
+  palette: [
+'darkblue', 'blue', 'yellow','orange','red','darkred'
+  ]
+};
+// среднее значение ГОТ за весь период
+function seasonalUHI(dataset, season, diurnal, label) {
+  var startM = (season === 'summer') ? 6 : 12;
+  var endM   = (season === 'summer') ? 8 : 2;
+
+  var filtered = dataset
+    .filter(ee.Filter.eq('diurnal', diurnal))
+    .filter(ee.Filter.calendarRange(startM, endM, 'month'));
+
+  var image = ee.Image(ee.Algorithms.If(filtered.size().gt(0),
+    filtered.mean().select('b1').multiply(0.01),
+    ee.Image().rename('b1')
+  )).clip(city);
+
+  // МАСКА: Показываем только если отклонение больше 0.1 градусов (и тепло, и холод)
+  var threshold = 0.1; 
+  var masked = image.updateMask(image.abs().gt(threshold));
+
+  Map.addLayer(masked, visUHI, label, false);
+
+  image.reduceRegion({
+    reducer: ee.Reducer.mean().combine(ee.Reducer.stdDev(), null, true),
+    geometry: city.geometry(),
+    scale: 1000,
+    maxPixels: 1e13
+  }).evaluate(function(d){
+    print(label + ' (статистика по всему городу):', d);
+  });
+
+  return image;
+}
+
+// Все карты
+seasonalUHI(SMYD1, 'summer', 'daytime',   'Summer Clear-sky Surface Day (весь период)');
+seasonalUHI(SMYD1, 'summer', 'nighttime', 'Summer Clear-sky Surface Night (весь период)');
+seasonalUHI(SMYD1, 'winter', 'daytime',   'Winter Clear-sky Surface Day (весь период)');
+seasonalUHI(SMYD1, 'winter', 'nighttime', 'Winter Clear-sky Surface Night (весь период)');
+
+// тренды за весь период по всем слоям
+function buildTrend(dataset, diurnal, season, label) {
+  var years = ee.List.sequence(2003, 2020); //строит по диапазону этих дат
+  var features = years.map(function(y) {
+    var yNum = ee.Number(y);
+    var filtered = dataset.filter(ee.Filter.eq('diurnal', diurnal));
+
+    var seasonFilter = (season === 'summer') ?
+      ee.Filter.and(ee.Filter.eq('year', yNum), ee.Filter.calendarRange(6,8,'month')) :
+      ee.Filter.or(
+        ee.Filter.and(ee.Filter.eq('year', yNum.subtract(1)), ee.Filter.calendarRange(12,12,'month')),
+        ee.Filter.and(ee.Filter.eq('year', yNum), ee.Filter.calendarRange(1,2,'month'))
+      );
+
+    filtered = filtered.filter(seasonFilter);
+
+    var val = ee.Image(ee.Algorithms.If(filtered.size().gt(0),
+      filtered.mean().select('b1').multiply(0.01),
+      ee.Image().rename('b1')
+    )).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: city.geometry(),    // используется маска
+      scale: 1000,
+      maxPixels: 1e13
+    }).get('b1');
+
+    return ee.Feature(null, {year: y, uhii: val});
+  });
+
+  var fc = ee.FeatureCollection(features).filter(ee.Filter.notNull(['uhii']));
+
+  var chart = ui.Chart.feature.byFeature(fc, 'year', 'uhii')
+    .setOptions({
+      title: label + ' (2003–2020, внутри границы города)',
+      trendlines: {0: {color: 'black', lineWidth: 3, showR2: true}},
+      hAxis: {title: 'Год', format: '####'},
+      vAxis: {title: 'UHII (°C)'},
+      series: {0: {pointSize: 4}}
+    });
+  print(chart);
+}
+
+// дневные тренды (13:30 и дневной максимум SAT)
+buildTrend(SMYD1, 'daytime', 'summer', 'Trend Summer Clear-sky Surface Day');
+buildTrend(SMYD1, 'daytime', 'winter', 'Trend Winter Clear-sky Surface Day');
+
+
+// ночные тренды (01:30 и ночной максимум SAT)
+buildTrend(SMYD1, 'nighttime', 'summer', 'Trend Summer  Clear-sky Surface Night');
+buildTrend(SMYD1, 'nighttime', 'winter', 'Trend Winter  Clear-sky Surface Night');
+
+// проверка одного пикселя
+//var testPoint = ee.Geometry.Point([-3.7038, 40.4168]);
+//Map.addLayer(testPoint, {color: 'blue'}, 'Тестовый пиксель (центр)');
+
+//var pixelChart = ui.Chart.image.series({
+//  imageCollection: SMYD1.filter(ee.Filter.eq('diurnal', 'daytime')),
+ // region: testPoint,
+ // scale: 1000
+//}).setOptions({
+ // title: 'UHII в одном пикселе (центр города, весь период)',
+ // vAxis: {title: 'UHII (°C)'}
+//});
+//print(pixelChart);
+
+// mean - среднее арифметическое (на сколько градусов город теплее/холоднее окружающей среды), 
+// stdDev - стандартное отклонение (разброс значений, степень неоднородности города)
+
+// расчет площади (UHII > 0)
+print('ПЛОЩАДЬ ОСТРОВА ТЕПЛА (UHII > 0) ДЛЯ ВСЕХ КОМБИНАЦИЙ И СТАТИСТИКА ПО ТРЕНДАМ');
+
+var combos = [
+
+  {dataset: SMYD1, season: 'summer', diurnal: 'daytime',   label: 'Summer Clear-sky Surface Day'},
+  {dataset: SMYD1, season: 'summer', diurnal: 'nighttime', label: 'Summer Clear-sky Surface Night'},
+  {dataset: SMYD1, season: 'winter', diurnal: 'daytime',   label: 'Winter Clear-sky Surface Day'},
+  {dataset: SMYD1, season: 'winter', diurnal: 'nighttime', label: 'Winter Clear-sky Surface Night'},
+];
+
+combos.forEach(function(c) {
+  var startM = (c.season === 'summer') ? 6 : 12;
+  var endM   = (c.season === 'summer') ? 8 : 2;
+
+  var filtered = c.dataset
+    .filter(ee.Filter.eq('diurnal', c.diurnal))
+    .filter(ee.Filter.calendarRange(startM, endM, 'month'));
+
+  var image = ee.Image(ee.Algorithms.If(filtered.size().gt(0),
+    filtered.mean().select('b1').multiply(0.01),
+    ee.Image().rename('b1')
+  )).clip(city);
+
+  var masked = image.updateMask(image.gt(0));
+
+  var areaDict = masked.gt(0).multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: city.geometry(),
+      scale: 1000,
+      maxPixels: 1e13
+    });
+
+  areaDict.evaluate(function(d){
+    var areaKm2 = d && d.b1 ? ee.Number(d.b1).divide(1e6) : null;
+    print(c.label + ':');
+    print('  Площадь UHII > 0 (км²):', areaKm2 ? areaKm2.format('%.2f') : 'нет данных');
+    print('---');
+  });
+
+});
+
+//ЭКСПОРТ ДАННЫХ
+function exportUHIMap(dataset, season, diurnal, label) {
+  var startM = (season === 'summer') ? 6 : 12;
+  var endM   = (season === 'summer') ? 8 : 2;
+  var filtered = dataset
+    .filter(ee.Filter.eq('diurnal', diurnal))
+    .filter(ee.Filter.calendarRange(startM, endM, 'month'));
+
+  var image = ee.Image(ee.Algorithms.If(
+    filtered.size().gt(0),
+    filtered.mean().select('b1').multiply(0.01),
+    ee.Image.constant(0).mask(ee.Image.constant(0)).rename('b1')
+  ));
+
+  //делаем тип Float и обрезаем по городу.
+  var exportImg = image.float().clip(city); 
+
+  Export.image.toDrive({
+    image: exportImg,
+    description: 'GOT_' + label.replace(/ /g, '_'),
+    folder: 'UHII_Exports',
+    scale: 1000,
+    region: city.geometry().bounds(), 
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+}
+
+// Запуск экспорта всех карт
+exportUHIMap(SMYD1, 'summer', 'daytime',   'Summer_ClearSky_Surface_Day');
+exportUHIMap(SMYD1, 'summer', 'nighttime', 'Summer_ClearSky_Surface_Night');
+exportUHIMap(SMYD1, 'winter', 'daytime',   'Winter_ClearSky_Surface_Day');
+exportUHIMap(SMYD1, 'winter', 'nighttime', 'Winter_ClearSky_Surface_Night');
+
+// ЭКСПОРТ ГРАНИЦЫ ГОРОДА В SHAPEFILE
+Export.table.toDrive({
+  collection: city,           
+  description: '_City_Boundary',
+  folder: 'UHII_Exports',      // Папка на Google Диске
+  fileFormat: 'SHP'           // Формат Shapefile
+});
